@@ -50,64 +50,43 @@ def transaction_filter(filters):
 
         if key == "keyword":
             keyword = value  # alias
+            upper_kw = keyword.upper()
 
-            # description_match = False
-            # description_qs = queryset.filter(description__icontains=keyword)
-            # if description_qs.exists():
-            #     description_match = True
-
-            recipient_match = False
+            recipient_qs = Q()
             recipient_list = LegalEntity.objects.all().values('legal_entity_id').filter(
                 recipient_name__icontains=keyword)
             if recipient_list.exists():
-                recipient_match = True
-                recipient_qs = queryset.filter(recipient__in=recipient_list)
+                recipient_qs = Q(recipient__in=recipient_list)
 
-            naics_match = False
+            naics_qs = Q()
             if keyword.isnumeric():
                 naics_list = NAICS.objects.all().filter(code__icontains=keyword).values('code')
             else:
-                naics_list = NAICS.objects.all().filter(
-                    description__icontains=keyword).values('code')
+                naics_list = NAICS.objects.all().filter(description__icontains=keyword).values('code')
             if naics_list.exists():
-                naics_match = True
-                naics_qs = queryset.filter(contract_data__naics__in=naics_list)
+                naics_qs = Q(contract_data__naics__in=naics_list)
 
-            psc_match = False
-            if len(keyword) == 4 and PSC.objects.all().filter(code=keyword).exists():
-                psc_list = PSC.objects.all().filter(code=keyword).values('code')
+            psc_qs = Q()
+            if len(keyword) == 4 and PSC.objects.all().filter(code__iexact=keyword).exists():
+                psc_list = PSC.objects.all().filter(code__iexact=keyword).values('code')
             else:
                 psc_list = PSC.objects.all().filter(description__icontains=keyword).values('code')
             if psc_list.exists():
-                psc_match = True
-                psc_qs = queryset.filter(contract_data__product_or_service_code__in=psc_list)
+                psc_qs = Q(contract_data__product_or_service_code__in=psc_list)
 
-            duns_match = False
-            non_parent_duns_list = LegalEntity.objects.all().values('legal_entity_id').filter(
-                recipient_unique_id=keyword)
-            parent_duns_list = LegalEntity.objects.all().values('legal_entity_id').filter(
-                parent_recipient_unique_id=keyword)
+            duns_qs = Q()
+            non_parent_duns_list = LegalEntity.objects.values('legal_entity_id').filter(
+                recipient_unique_id=upper_kw)
+            parent_duns_list = LegalEntity.objects.values('legal_entity_id').filter(
+                parent_recipient_unique_id=upper_kw)
             duns_list = non_parent_duns_list | parent_duns_list
             if duns_list.exists():
-                duns_match = True
-                duns_qs = queryset.filter(recipient__in=duns_list)
+                duns_qs = Q(recipient__in=duns_list)
 
-            piid_qs = queryset.filter(contract_data__piid=keyword)
-            fain_qs = queryset.filter(assistance_data__fain=keyword)
+            piid_qs = Q(contract_data__piid=keyword)
+            fain_qs = Q(assistance_data__fain=keyword)
 
-            # Always filter on fain/piid because fast:
-            queryset = piid_qs
-            queryset |= fain_qs
-            # if description_match:
-            #     queryset |= description_qs
-            if recipient_match:
-                queryset |= recipient_qs
-            if naics_match:
-                queryset |= naics_qs
-            if psc_match:
-                queryset |= psc_qs
-            if duns_match:
-                queryset |= duns_qs
+            queryset = queryset.filter(piid_qs | fain_qs | recipient_qs | naics_qs | psc_qs | duns_qs)
 
         elif key == "elasticsearch_keyword":
             keyword = value
