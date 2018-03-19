@@ -8,6 +8,8 @@ from usaspending_api.awards.v2.lookups.elasticsearch_lookups import TRANSACTIONS
 from usaspending_api.awards.v2.lookups.elasticsearch_lookups import AWARD_QUERY_TO_ES
 
 from usaspending_api.core.elasticsearch.client import es_client_query
+from elasticsearch import Elasticsearch
+
 logger = logging.getLogger('console')
 
 TRANSACTIONS_INDEX_ROOT = settings.TRANSACTIONS_INDEX_ROOT
@@ -16,7 +18,9 @@ KEYWORD_DATATYPE_FIELDS = ['{}.raw'.format(i) for i in KEYWORD_DATATYPE_FIELDS]
 
 TRANSACTIONS_LOOKUP.update({v: k for k, v in TRANSACTIONS_LOOKUP.items()})
 
-CLIENT = ElasticSearch(settings.ES_HOSTNAME)
+CLIENT = Elasticsearch(settings.ES_HOSTNAME)
+
+
 def preprocess(keyword):
     """Remove Lucene special characters instead of escaping for now"""
     processed_string = re.sub('[\/:\]\[\^!]', '', keyword)
