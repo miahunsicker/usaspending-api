@@ -8,6 +8,7 @@ import subprocess
 import tempfile
 import time
 import zipfile
+import csv
 
 from collections import OrderedDict
 from django.conf import settings
@@ -113,7 +114,7 @@ def generate_csvs(download_job, sqs_message=None):
         raise Exception(download_job.error_message)
     finally:
         # Remove generated file
-        if os.path.exists(file_path):
+        if not settings.IS_LOCAL and os.path.exists(file_path):
             os.remove(file_path)
 
     return finish_download(download_job)
@@ -180,6 +181,10 @@ def parse_source(source, columns, download_job, working_dir, start_time, message
 
 def split_and_zip_csvs(zipfile_path, source_path, source_name, download_job):
     try:
+        # Log how many rows we have
+        with open(source_path, 'r') as source_csv:
+            download_job.number_of_rows += sum(1 for row in csv.reader(source_csv)) - 1
+
         # Split CSV into separate files
         log_time = time.time()
         split_csvs = split_csv(source_path, row_limit=EXCEL_ROW_LIMIT, output_path=os.path.dirname(source_path),
