@@ -16,7 +16,7 @@ KEYWORD_DATATYPE_FIELDS = ['{}.raw'.format(i) for i in KEYWORD_DATATYPE_FIELDS]
 
 TRANSACTIONS_LOOKUP.update({v: k for k, v in TRANSACTIONS_LOOKUP.items()})
 
-
+CLIENT = ElasticSearch(settings.ES_HOSTNAME)
 def preprocess(keyword):
     """Remove Lucene special characters instead of escaping for now"""
     processed_string = re.sub('[\/:\]\[\^!]', '', keyword)
