@@ -5,6 +5,8 @@ from django.conf import settings
 from usaspending_api.awards.v2.lookups.elasticsearch_lookups import KEYWORD_DATATYPE_FIELDS
 from usaspending_api.awards.v2.lookups.elasticsearch_lookups import indices_to_award_types
 from usaspending_api.awards.v2.lookups.elasticsearch_lookups import TRANSACTIONS_LOOKUP
+from usaspending_api.awards.v2.lookups.elasticsearch_lookups import AWARD_QUERY_TO_ES
+
 from usaspending_api.core.elasticsearch.client import es_client_query
 logger = logging.getLogger('console')
 
@@ -236,3 +238,246 @@ def get_sum_and_count_aggregation_results(keyword):
 
 def spending_by_transaction_sum_and_count(request_data):
     return get_sum_and_count_aggregation_results(request_data['keyword'])
+
+
+
+AWARDS_INDEX = 'thunderdome-transactions'
+ES_FILTER_FIELDS = ['recipient_location', 'pop']
+RANGE_QUERIES = ['action_date', 'transaction_amount']
+BAD_KEYS = ['psc_codes'] # don't have these in ES
+
+
+AWARD_QUERY_TO_ES.update({v: k for k, v in AWARD_QUERY_TO_ES.items()})
+
+
+def swap_keys(dictionary_):
+    return dict((AWARD_QUERY_TO_ES.get(old_key, old_key), new_key)
+                for (old_key, new_key) in dictionary_.items())
+
+
+def range_query(filters, column):
+    filter_ = filters[column]
+    queries = []
+    for f in filter_:
+        start = {'range': {column: {'gte': min(f.values())}}}
+        end = {'range': {column: {'lte': max(f.values())}}}
+        if len(filter_) == 1:
+            queries.extend([start, end])
+            return queries
+        else:
+            queries.append((start, end))
+    return [format_dismax(queries, format_=False)]
+
+
+def location_helpers_es(filters, type_='place_of_performance_locations',
+                        type='match'):
+    '''returns a must filter
+    also returns a dismax if the
+    length is > 1 to get all combinations
+    '''
+    filter_ = filters[type_]
+    new_filters = []
+    for f in filter_:
+        temp_filter = []
+        temp_dict = {}
+        for k, v in f.items():
+            # this value is hard coded which is why the function is special
+            es_value = '{}_{}_code'.format(type_, k)
+            temp_filter.append({es_value: v})
+        temp_dict = reduce(lambda a, b: a.update(b) or a, temp_filter)
+        new_filters.append(temp_dict)
+    if len(new_filters) > 1:
+        return format_dismax(new_filters, query_type='match')
+    else:
+        return match_query(new_filters, query_type='match')
+
+
+def format_dismax(list_of_queries, query_type='terms', format_=True):
+    query_list = []
+    for query in list_of_queries:
+        if format_:
+            data = match_query(query, query_type)
+            query_list.append(dict(bool=dict(must=data)))
+        else:
+            query_list.append(dict(bool=dict(filter=query)))
+    response = dict(dis_max=dict(queries=query_list))
+    return response
+
+
+def format_filters_query(filters):
+    '''
+    First step in filters manipulation, pops fields
+    that must be formated for dis_max must query
+
+    this function handles multiple depths of queries
+    for different intervals for times, amounts, and different
+    location combinations.
+    '''
+
+    es_filter_query = []
+
+    for field in ES_FILTER_FIELDS:
+        temp_filters = []
+        data = filters.get(field, None)
+        if data:
+            temp_filters.append(location_helpers_es(filters, field))
+            filters.pop(field)
+            es_filter_query.append(temp_filters)
+
+    for field in RANGE_QUERIES:
+        temp_filters = []
+        data = filters.get(field, None)
+        if data:
+            temp_filters.append(range_query(filters, field))
+            filters.pop(field)
+            es_filter_query.append(temp_filters)
+    return es_filter_query, filters
+
+
+def match_query(filters, query_type='terms'):
+    '''
+    This formats the rest of the filters in the request
+    to a match query and defaults to terms
+    becuase the expected type for each value is a list.
+
+    this is called with list type for some of
+    the dismax queries and filter queries, in whcih type
+    we return a boolean query that will be used to filter
+    '''
+    must_query = []
+    if type(filters) is list:
+        for item in filters:
+            for column, values in item.items():
+                must_query.append({query_type: {column: values}})
+        return dict(bool=dict(must=must_query))
+    else:
+        for column, values in filters.items():
+            must_query.append({query_type: {column: values}})
+    return must_query
+
+
+def preprocess(filters, type_='agencies'):
+    '''reformats agency filter to be a
+    list like all of the others
+    '''
+    if filters.get(type_, None):
+        filter_ = filters.pop(type_)
+        response = defaultdict(list)
+        for f in filter_:
+            # this value is hard coded so this is also special
+            es_value = "{}_{}_agency_name".format(f['type'], f['tier'])
+            response[es_value].append(f['name'])
+        filters.update(dict(response))
+    for f in BAD_KEYS:
+        filters.pop(f, None)
+    return swap_keys(filters)
+
+
+def time_aggs(group, aggregation_field='transaction_amount'):
+    time_period = dict(date_histogram=dict(field='action_date',
+                                           interval=group))
+    time_period['aggs'] = dict(aggregated_amount=dict(sum=dict(field=aggregation_field)))
+    return dict(results=time_period)
+
+
+def geography_aggs(filters, aggregation_field='transaction_amount'):
+    scope = filters['scope']
+    layer = filters['geo_layer']
+    if scope.startswith('place_of_performance'):
+        scope = 'pop'
+    field = '{}_{}_code'.format(scope, layer)
+    if layer.startswith('zip'):
+        field = '{}_{}'.format(scope, layer)
+
+    aggregated_amount = dict(sum=dict(field=aggregation_field))
+    shape_code = dict(terms=dict(field=field),
+                      aggs=dict(aggregated_amount=aggregated_amount)
+                      )
+    return dict(results=shape_code)
+
+
+def master_filter_function(filters):
+    '''returns the filter query
+    format_filters_query MUST be called first becasue it pops keys not to be
+    put in the match query
+
+    the format_filters_query handles multiple depths of queries
+    for different intervals for times, amounts, and different
+    location combinations
+
+    query = {"bool": {
+                 "must": es_must_query,
+                 "filter": es_filter_query
+                }
+            }
+    '''
+
+    filters = preprocess(filters)
+
+    es_filter_query, filters = format_filters_query(filters)
+    es_must_query = match_query(filters)
+
+    filters_portion = dict(bool=dict(filter=es_filter_query,
+                                     must=es_must_query))
+    return filters_portion
+
+
+def spending_over_time(request_data):
+    '''
+    the response['aggregations'] needs to be
+    reformated and returned for the frontend
+    '''
+    filters_portion = master_filter_function(request_data['filters'])
+    group = request_data['group']
+    aggs_portion = time_aggs(group)
+
+    query = dict(query=filters_portion, aggs=aggs_portion)
+    response = CLIENT.search(AWARDS_INDEX, body=json.dumps(query))
+    return format_time_frontend(response, group)
+
+
+def format_time_frontend(response, group, divisor=1):
+    '''this function formats a date from integer in the key
+    and groups accordingly
+    '''
+    data = response['aggregations']['results']['buckets']
+    results = []
+    if group == 'quarter':
+        divisor = 3
+    for d in data:
+        total_amount = d['aggregated_amount']['value']
+        date = datetime.datetime.fromtimestamp(d['key'] / 1e3)
+        group_value = int(math.ceil(date.month//divisor))
+        response_data = {'fiscal_year': date.year,
+                         group: group_value}
+        data = dict(aggregated_amount=total_amount,
+                    time_period=response_data)
+        results.append(data)
+    return results
+
+
+def spending_by_geography(request_data):
+    '''
+    the response['aggregations'] needs to be
+    reformated and returned for the frontend
+    '''
+    filters_portion = master_filter_function(request_data['filters'])
+    aggs_portion = geography_aggs(request_data)
+
+    query = dict(query=filters_portion, aggs=aggs_portion)
+    response = CLIENT.search(AWARDS_INDEX, body=json.dumps(query))
+    return geography_frontend_response(response)
+
+
+def geography_frontend_response(response):
+    data = response['aggregations']['results']['buckets']
+    results = []
+    for d in data:
+        total_amount = d['aggregated_amount']['value']
+        key = d['key']
+        # results.append({key: total_amount})
+        data = dict(aggregated_amount=total_amount,
+                    shape_code=key,
+                    display_name=key)
+        results.append(data)
+    return results

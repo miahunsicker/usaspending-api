@@ -52,3 +52,10 @@ indices_to_award_types = {
 }
 
 KEYWORD_DATATYPE_FIELDS = ['recipient_name', 'awarding_toptier_agency_name', 'awarding_subtier_agency_name']
+
+
+AWARD_QUERY_TO_ES = {"recipient_locations": "recipient_location",
+                    "place_of_performance_locations": "pop",
+                    "award_type_codes": "type",
+                    "award_amounts": "transaction_amount",#This is a place holder bc we only have transactions
+                    "time_period": "action_date"}
